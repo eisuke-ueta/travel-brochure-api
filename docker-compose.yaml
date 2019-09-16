@@ -1,0 +1,44 @@
+version: '3.6'
+services:
+
+  # MySQL
+  travel-brochure-mysql:
+    container_name: travel-brochure-mysql
+    build: ./mysql
+    env_file:
+      - .env
+    ports:
+      - '3306:3306'
+    networks:
+      - travel_brochure_common_link
+
+  # Redis
+  redis:
+    container_name: redis
+    image: redis:5.0
+    ports:
+      - "6379:6379"
+    networks:
+      - travel_brochure_common_link
+
+  # API
+  travel-brochure-api:
+    container_name: travel-brochure-api
+    build: ./
+    depends_on:
+      - travel-brochure-mysql
+      - redis
+    volumes:
+      - ./app:/usr/src/travel-brochure-api/app
+      - ./mysql:/usr/src/travel-brochure-api/mysql
+    working_dir: /usr/src/travel-brochure-api
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    networks:
+      - travel_brochure_common_link
+
+networks:
+    travel_brochure_common_link:
+        external: true

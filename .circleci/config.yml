@@ -1,0 +1,100 @@
+version: 2
+
+defaults: &defaults
+  working_directory: ~/repo
+  docker:
+    - image: circleci/node:10.16
+
+filter_only_master: &filter_only_master
+  filters:
+    branches:
+      only: master
+
+jobs:
+  install:
+    <<: *defaults
+    steps:
+      - checkout
+      - restore_cache:
+          name: Restore Node Package Cache
+          keys:
+            - npm-packages-{{ checksum "package.json" }}
+      - run: npm install
+      - save_cache:
+          name: Save Node Package Cache
+          key: npm-packages-{{ checksum "package.json" }}
+          paths:
+            - ~/.cache/npm
+      - persist_to_workspace:
+          root: ~/repo
+          paths:
+            - ./*
+
+  test:
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: ~/repo
+      - run: npm run test
+
+  build:
+    working_directory: ~/repo
+    docker:
+      - image: google/cloud-sdk
+    steps:
+      - attach_workspace:
+          at: ~/repo
+      - setup_remote_docker:
+          docker_layer_caching: true
+      # Set up gcp
+      - run: echo $GCLOUD_SERVICE_KEY | base64 --decode > $HOME/gcloud-service-key.json
+      - run: gcloud auth activate-service-account --key-file=$HOME/gcloud-service-key.json
+      - run: gcloud --quiet config set project $GCP_PROJECT
+      - run: gcloud --quiet config set compute/zone asia-northeast1-a
+      # Prepare secret files
+      - run: echo $GCLOUD_SERVICE_KEY | base64 --decode > gcloud-service-key.json
+      # Build and push docker image
+      - run: >-
+          docker build -t asia.gcr.io/${GCP_PROJECT}/travel-brochure-api:$CIRCLE_SHA1 .
+          --build-arg NUXT_ENV_BASE_URL=$NUXT_ENV_BASE_URL
+          --build-arg NUXT_ENV_API_BASE_URL=$NUXT_ENV_API_BASE_URL
+          --build-arg NUXT_ENV_IMAGE_BASE_URL=$NUXT_ENV_IMAGE_BASE_URL
+      - run: docker tag asia.gcr.io/${GCP_PROJECT}/travel-brochure-api:$CIRCLE_SHA1 asia.gcr.io/${GCP_PROJECT}/travel-brochure-api:latest
+      - run: docker build -t asia.gcr.io/${GCP_PROJECT}/travel-brochure-mysql:$CIRCLE_SHA1 mysql/
+      - run: docker tag asia.gcr.io/${GCP_PROJECT}/travel-brochure-mysql:$CIRCLE_SHA1 asia.gcr.io/${GCP_PROJECT}/travel-brochure-mysql:latest
+      - run: gcloud docker -- push asia.gcr.io/$GCP_PROJECT/travel-brochure-api:$CIRCLE_SHA1
+      - run: gcloud docker -- push asia.gcr.io/$GCP_PROJECT/travel-brochure-api:latest
+      - run: gcloud docker -- push asia.gcr.io/$GCP_PROJECT/travel-brochure-mysql:$CIRCLE_SHA1
+      - run: gcloud docker -- push asia.gcr.io/$GCP_PROJECT/travel-brochure-mysql:latest
+
+  deploy:
+    working_directory: ~/repo
+    docker:
+      - image: google/cloud-sdk
+    steps:
+      - run: echo $GCLOUD_SERVICE_KEY | base64 --decode > ${HOME}/gcloud-service-key.json
+      - run: gcloud auth activate-service-account --key-file=${HOME}/gcloud-service-key.json
+      - run: gcloud --quiet config set project $GCP_PROJECT
+      - run: gcloud container clusters get-credentials travel-brochure --zone us-central1-a
+      - run: kubectl set image deployments/travel-brochure-api-deployment travel-brochure-api=asia.gcr.io/$GCP_PROJECT/travel-brochure-api:$CIRCLE_SHA1
+      - run: kubectl set image deployments/travel-brochure-mysql-deployment travel-brochure-mysql=asia.gcr.io/$GCP_PROJECT/travel-brochure-mysql:$CIRCLE_SHA1
+
+workflows:
+  version: 2
+  test-build-deploy:
+    jobs:
+      - install
+      - test:
+          requires:
+            - install
+      - build:
+          <<: *filter_only_master
+          requires:
+            - install
+            - test
+      - deploy:
+          <<: *filter_only_master
+          requires:
+            - install
+            - test
+            - build
